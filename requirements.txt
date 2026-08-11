@@ -1,0 +1,17 @@
+# Eden MHGU Damage Overlay - Python Dependencies
+# Install: pip install -r requirements.txt
+#
+# Core dependencies (required):
+# pywin32 - Windows API bindings for process management and overlay
+pywin32>=300
+# numpy - fast alpha post-processing in the overlay renderer
+numpy>=1.24
+# Pillow - FreeType text rendering core (antialiased damage numbers)
+pillow>=10.0
+
+# Optional dependencies:
+# pymem - High-level memory reading (alternative to ctypes)
+# pymem>=1.0
+
+# Note: ctypes, struct, threading, and other stdlib modules are used directly.
+# No additional packages are strictly required beyond Python 3.8+ and pywin32.

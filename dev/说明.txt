@@ -1,0 +1,16 @@
+本文件夹是开发期辅助工具,不是插件本体
+========================================
+
+这里的脚本与插件运行无关,发布到 GitHub 时可整体删除本文件夹,
+也可以保留供其他开发者研究。
+
+内容:
+- monitor_debug.py              — 诊断脚本:以插件相同逻辑追踪怪物 180 秒,
+                                  只打印伤害日志,不显示叠加层
+- tools/render_compare.py       — 渲染对比脚本:生成 GDI vs Pillow 的效果对比图
+- tools/test_tracker_fix.py     — 换区防护回归测试(12 项断言)
+- tools/damage_small_vs_large.png — 小怪/大怪显示效果对比图(开发期产物)
+
+运行方式(需从项目根目录执行):
+    python dev/monitor_debug.py
+    python dev/tools/test_tracker_fix.py
