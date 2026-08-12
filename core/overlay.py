@@ -258,13 +258,16 @@ class OverlayRenderer:
             return
         spr = sprite[sy0:sy0 + sh, sx0:sx0 + sw]
         region = buf[dy0:dy0 + sh, dx0:dx0 + sw]
-        if opacity >= 0.999:
-            np.copyto(region, spr)  # opaque: plain overwrite (old behavior)
-            return
+        # Premultiplied source-over with per-number opacity. Never a plain
+        # overwrite: an opaque blit would erase (zero the alpha of) any
+        # number already composited underneath. Fading scales BOTH the rgb
+        # and alpha of the source, otherwise the premultiplied invariant
+        # breaks and fading numbers get a bright halo.
         sa = spr[:, :, 3].astype(np.float64) * opacity
-        inv = 1.0 - sa / 255.0
+        inv = (1.0 - sa / 255.0)
         region[:, :, 3] = np.clip(sa + region[:, :, 3] * inv + 0.5, 0, 255).astype(np.uint8)
-        rgb = spr[:, :, :3].astype(np.float64) + region[:, :, :3].astype(np.float64) * inv[:, :, None]
+        rgb = spr[:, :, :3].astype(np.float64) * opacity \
+            + region[:, :, :3].astype(np.float64) * inv[:, :, None]
         region[:, :, :3] = np.clip(rgb + 0.5, 0, 255).astype(np.uint8)
 
     # ── Frame render ──────────────────────────────────────────────────
@@ -347,6 +350,8 @@ class OverlayRenderer:
         return self._dc_high
 
     def spawn_damage_number(self, damage: int, is_small: bool = False):
+        if not self.config.renderer.show_damage_numbers:
+            return
         with self._lock:
             cfg = self.config
             fs = cfg.renderer.font_size
