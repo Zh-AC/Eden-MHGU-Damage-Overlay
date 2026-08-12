@@ -155,7 +155,9 @@ def read_u8(handle: int, address: int) -> Optional[int]:
 
 def read_u16(handle: int, address: int) -> Optional[int]:
     data = read_mem(handle, address, 2)
-    return int.from_bytes(data, 'little') if data else None
+    if data is None or len(data) < 2:
+        return None  # partial read would decode as a wrong small value
+    return int.from_bytes(data, 'little')
 
 
 def read_hp(handle: int, address: int) -> Optional[int]:
