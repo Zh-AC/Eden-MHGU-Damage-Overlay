@@ -20,7 +20,7 @@ Requirements:
     - eden Switch emulator running MHGU
 """
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 import sys
 import os
@@ -110,11 +110,11 @@ try:
         open_process,
         get_game_region,
         find_monster_hp,
-        read_hp,
+        describe_monster,
         EdenMonsterTracker,
     )
     from core.overlay import OverlayRenderer
-    from core.addresses import EMULATOR_PROCESSES, SMALL_MONSTERS
+    from core.addresses import EMULATOR_PROCESSES, SMALL_MONSTERS, MONSTER_NAMES
     _log('All core modules imported successfully.')
 except Exception as e:
     _log(f'Module import failed: {e}\n{traceback.format_exc()}')
@@ -206,7 +206,7 @@ class MHGUDamageOverlay:
         if has_scanmodule():
             _log('Using EdenMonsterTracker (scanmodule)')
             self.scanner = None  # Not using MemoryScanner for eden
-            self.eden_base = get_game_region(self.pid)
+            self.eden_base = get_game_region(self.pid, self.config.scanner.emulator_process)
             _log(f'Game region from scanmodule: 0x{self.eden_base:X}' if self.eden_base else 'Game region: None')
             self.tracker = EdenMonsterTracker(self.process_handle)
             self._found_hp_addresses = set()
@@ -234,6 +234,7 @@ class MHGUDamageOverlay:
     def _is_game_running(self) -> bool:
         """Check if MHGU is running in the emulator by window title."""
         import ctypes
+        import ctypes.wintypes
         user32 = ctypes.windll.user32
         found = False
 
@@ -353,8 +354,10 @@ class MHGUDamageOverlay:
             _log(f'Trying {len(self._cached_hp_addrs)} cached addresses...')
             valid_cached = []
             for addr in self._cached_hp_addrs:
-                hp = read_hp(self.process_handle, addr)
-                if hp and 1 <= hp <= 65535:
+                # Validate the slot is still a real monster (id + sane HP)
+                # before reusing it - memory may have been recycled.
+                desc = describe_monster(self.process_handle, addr)
+                if desc and desc[0] in MONSTER_NAMES and 1 <= desc[1] <= (desc[2] or 65535):
                     valid_cached.append(addr)
                     if addr not in found_addresses:
                         self.tracker.add_monster(addr)
@@ -377,12 +380,12 @@ class MHGUDamageOverlay:
                             found_addresses.add(addr)
                             _log(f'Monster tracked: 0x{addr:X}')
             except Exception as e:
-                pass
+                _log(f'AOB scan error: {e}')
             return
 
         # If scanmodule available but base not found, retry getting base
         if has_scanmodule() and not self.eden_base:
-            self.eden_base = get_game_region(self.pid)
+            self.eden_base = get_game_region(self.pid, self.config.scanner.emulator_process)
             if self.eden_base:
                 _log(f'Game region found on retry: 0x{self.eden_base:X}')
                 return
