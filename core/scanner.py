@@ -687,8 +687,9 @@ class MonsterTracker:
 
         # Clean up dead/despawned monsters
         for mid in monsters_to_remove:
+            addr = self.monsters[mid].hp_address  # read before deleting
             del self.monsters[mid]
-            self._baseline_hp.pop(self.monsters[mid].hp_address, None)
+            self._baseline_hp.pop(addr, None)
 
         return new_events
 
