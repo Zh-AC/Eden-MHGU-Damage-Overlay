@@ -17,7 +17,7 @@ Eden模拟器中的XX表现如何我没有测试过。反馈BUG的话可能会�
 ## 功能
 
 - 怪物和小动物的伤害都显示(小怪默认降级显示:小字号、低透明度,不挡视线)
-- 伤害分级配色:低伤害白色、中伤害黄色、高伤害橙色(阈值可配置)
+- 伤害分级配色:低伤害白色、中伤害黄色、高伤害橙色(默认**固定阈值**:白 &lt; 40、黄 &lt; 80、橙 ≥ 80,阈值和颜色都可在 config.ini 调整)
 
 ## 使用方式
 
@@ -53,7 +53,7 @@ Eden模拟器中的XX表现如何我没有测试过。反馈BUG的话可能会�
 | 功能 | 配置项 | 默认值 |
 |---|---|---|
 | 伤害数字分级配色 | `DamageColorLow / Mid / High`(白/黄/橙) | `#FFFFFF / #FFD93B / #E49124` |
-| 分级边界 | `DamageThresholdMid / High` | `40 / 80`(白 &lt;40,橙 ≥80) |
+| 分级阈值 | `DamageThresholdMid / High`(白 &lt; Mid,橙 ≥ High) | `40 / 80` |
 | 数字出现位置(锚点) | `AnchorXRatio / AnchorYRatio`(屏幕比例 0~1) | `0.5 / 0.5`(屏幕中央) |
 | 小怪数字降级 | `SmallFontScale`(字号比例)、`SmallOpacity`(最大不透明度) | `0.6 / 0.65` |
 | 字体与字号 | `FontPath`、`FontSize` | 系统 Bahnschrift / `70` |
