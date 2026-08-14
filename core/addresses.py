@@ -66,9 +66,7 @@ STATUS_OFFSETS = {
     "Rage":      0x1A4,   # Rage timer (seconds remaining)
 }
 
-# ── Memory Region Configuration ────────────────────────────────────
-
-# Memory base addresses to try when locating game data
+# ── Memory Region Configuration ────────────────────────────────────# Memory base addresses to try when locating game data
 # These are virtual address offsets where Switch emulators map game RAM
 MEMORY_BASE_ADDRESSES = [
     0xE955000,   # Primary region
