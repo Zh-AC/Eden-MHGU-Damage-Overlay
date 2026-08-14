@@ -9,6 +9,67 @@ import configparser
 from dataclasses import dataclass, field
 
 
+# ── Robust config reading ──────────────────────────────────────────────
+# Any bad value in config.ini must NOT crash the plugin: non-numeric
+# values fall back to defaults, out-of-range values are clamped, and
+# every correction is collected here so the main app can log it.
+
+CONFIG_WARNINGS = []
+
+
+def _warn(msg: str):
+    CONFIG_WARNINGS.append(msg)
+
+
+def take_config_warnings():
+    """Return the warnings collected by the last load_config() and reset."""
+    out = list(CONFIG_WARNINGS)
+    CONFIG_WARNINGS.clear()
+    return out
+
+
+def _get_int(parser, section, key, default, lo, hi):
+    try:
+        raw = parser.get(section, key)
+    except (configparser.NoSectionError, configparser.NoOptionError):
+        return default
+    try:
+        v = int(str(raw).strip())
+    except ValueError:
+        _warn(f'{key} = {raw!r} 不是整数, 已恢复默认值 {default}')
+        return default
+    if v < lo or v > hi:
+        nv = max(lo, min(v, hi))
+        _warn(f'{key} = {v} 超出安全范围 {lo}~{hi}, 已自动修正为 {nv}')
+        return nv
+    return v
+
+
+def _get_float(parser, section, key, default, lo, hi):
+    try:
+        raw = parser.get(section, key)
+    except (configparser.NoSectionError, configparser.NoOptionError):
+        return default
+    try:
+        v = float(str(raw).strip())
+    except ValueError:
+        _warn(f'{key} = {raw!r} 不是数字, 已恢复默认值 {default}')
+        return default
+    if v < lo or v > hi:
+        nv = max(lo, min(v, hi))
+        _warn(f'{key} = {v} 超出安全范围 {lo}~{hi}, 已自动修正为 {nv}')
+        return nv
+    return v
+
+
+def _get_bool(parser, section, key, default):
+    try:
+        return parser.getboolean(section, key, fallback=default)
+    except ValueError:
+        _warn(f'{key} 的值无法识别(应为 0/1), 已恢复默认值 {int(default)}')
+        return default
+
+
 @dataclass
 class RendererConfig:
     """Display/rendering settings."""
@@ -38,6 +99,7 @@ class LogicConfig:
     fade_time: int = 30       # frames for fade-out animation
     x_stagger_step: int = 45  # horizontal spread between overlapping numbers
     overlap_max: int = 10     # max overlapping damage numbers
+
 
 
 @dataclass
@@ -98,6 +160,7 @@ def load_config(config_path: str = None) -> OverlayConfig:
     if config_path is None:
         config_path = _get_default_config_path()
 
+    CONFIG_WARNINGS.clear()
     cfg = OverlayConfig()
 
     if not os.path.exists(config_path):
@@ -111,42 +174,46 @@ def load_config(config_path: str = None) -> OverlayConfig:
     if parser.has_section('Renderer'):
         r = cfg.renderer
         r.font_path = parser.get('Renderer', 'FontPath', fallback=r.font_path)
-        r.font_size = parser.getint('Renderer', 'FontSize', fallback=r.font_size)
-        r.show_damage_numbers = parser.getboolean('Renderer', 'ShowDamageNumbers', fallback=r.show_damage_numbers)
+        r.font_size = _get_int(parser, 'Renderer', 'FontSize', r.font_size, 8, 800)
+        r.show_damage_numbers = _get_bool(parser, 'Renderer', 'ShowDamageNumbers', r.show_damage_numbers)
         r.damage_color_low = parser.get('Renderer', 'DamageColorLow', fallback=r.damage_color_low)
         r.damage_color_mid = parser.get('Renderer', 'DamageColorMid', fallback=r.damage_color_mid)
         r.damage_color_high = parser.get('Renderer', 'DamageColorHigh', fallback=r.damage_color_high)
-        r.damage_threshold_mid = parser.getint('Renderer', 'DamageThresholdMid', fallback=r.damage_threshold_mid)
-        r.damage_threshold_high = parser.getint('Renderer', 'DamageThresholdHigh', fallback=r.damage_threshold_high)
-        r.anchor_x_ratio = parser.getfloat('Renderer', 'AnchorXRatio', fallback=r.anchor_x_ratio)
-        r.anchor_y_ratio = parser.getfloat('Renderer', 'AnchorYRatio', fallback=r.anchor_y_ratio)
-        r.small_font_scale = parser.getfloat('Renderer', 'SmallFontScale', fallback=r.small_font_scale)
-        r.small_opacity = parser.getfloat('Renderer', 'SmallOpacity', fallback=r.small_opacity)
-        r.damage_shadow_enabled = parser.getboolean('Renderer', 'DamageShadowEnabled', fallback=r.damage_shadow_enabled)
+        r.damage_threshold_mid = _get_int(parser, 'Renderer', 'DamageThresholdMid', r.damage_threshold_mid, 0, 1000000)
+        r.damage_threshold_high = _get_int(parser, 'Renderer', 'DamageThresholdHigh', r.damage_threshold_high, 0, 1000000)
+        if r.damage_threshold_mid > r.damage_threshold_high:
+            _warn('DamageThresholdMid 大于 DamageThresholdHigh, 已自动对调')
+            r.damage_threshold_mid, r.damage_threshold_high = r.damage_threshold_high, r.damage_threshold_mid
+        r.anchor_x_ratio = _get_float(parser, 'Renderer', 'AnchorXRatio', r.anchor_x_ratio, 0.0, 1.0)
+        r.anchor_y_ratio = _get_float(parser, 'Renderer', 'AnchorYRatio', r.anchor_y_ratio, 0.0, 1.0)
+        r.small_font_scale = _get_float(parser, 'Renderer', 'SmallFontScale', r.small_font_scale, 0.1, 2.0)
+        r.small_opacity = _get_float(parser, 'Renderer', 'SmallOpacity', r.small_opacity, 0.0, 1.0)
+        r.damage_shadow_enabled = _get_bool(parser, 'Renderer', 'DamageShadowEnabled', r.damage_shadow_enabled)
         r.damage_shadow_color = parser.get('Renderer', 'DamageShadowColor', fallback=r.damage_shadow_color)
-        r.damage_shadow_offset_x = parser.getint('Renderer', 'DamageShadowOffsetX', fallback=r.damage_shadow_offset_x)
-        r.damage_shadow_offset_y = parser.getint('Renderer', 'DamageShadowOffsetY', fallback=r.damage_shadow_offset_y)
-        r.damage_shadow_thickness = parser.getint('Renderer', 'DamageShadowThickness', fallback=r.damage_shadow_thickness)
+        r.damage_shadow_offset_x = _get_int(parser, 'Renderer', 'DamageShadowOffsetX', r.damage_shadow_offset_x, -500, 500)
+        r.damage_shadow_offset_y = _get_int(parser, 'Renderer', 'DamageShadowOffsetY', r.damage_shadow_offset_y, -500, 500)
+        r.damage_shadow_thickness = _get_int(parser, 'Renderer', 'DamageShadowThickness', r.damage_shadow_thickness, 0, 50)
 
     # [Logic]
     if parser.has_section('Logic'):
         l = cfg.logic
-        l.lifetime = parser.getint('Logic', 'Lifetime', fallback=l.lifetime)
-        l.fade_time = parser.getint('Logic', 'FadeTime', fallback=l.fade_time)
-        l.x_stagger_step = parser.getint('Logic', 'XStaggerStep', fallback=l.x_stagger_step)
-        l.overlap_max = parser.getint('Logic', 'OverlapMax', fallback=l.overlap_max)
+        l.lifetime = _get_int(parser, 'Logic', 'Lifetime', l.lifetime, 1, 3600)
+        l.fade_time = _get_int(parser, 'Logic', 'FadeTime', l.fade_time, 0, 3600)
+        l.x_stagger_step = _get_int(parser, 'Logic', 'XStaggerStep', l.x_stagger_step, 0, 500)
+        l.overlap_max = _get_int(parser, 'Logic', 'OverlapMax', l.overlap_max, 1, 200)
 
     # [Scanner]
     if parser.has_section('Scanner'):
         s = cfg.scanner
-        s.hp_max_limit = parser.getint('Scanner', 'HpMaxLimit', fallback=s.hp_max_limit)
-        s.scan_interval_ms = parser.getint('Scanner', 'ScanIntervalMs', fallback=s.scan_interval_ms)
+        s.hp_max_limit = _get_int(parser, 'Scanner', 'HpMaxLimit', s.hp_max_limit, 1000, 1000000000)
+        s.scan_interval_ms = _get_int(parser, 'Scanner', 'ScanIntervalMs', s.scan_interval_ms, 50, 5000)
         s.emulator_process = parser.get('Scanner', 'EmulatorProcess', fallback=s.emulator_process)
         patterns_str = parser.get('Scanner', 'AobPatterns', fallback='')
         if patterns_str:
             s.aob_patterns = [p.strip() for p in patterns_str.split('\n') if p.strip()]
-        s.scan_region_start = parser.getint('Scanner', 'ScanRegionStart', fallback=s.scan_region_start)
-        s.scan_region_end = parser.getint('Scanner', 'ScanRegionEnd', fallback=s.scan_region_end)
+        s.scan_region_start = _get_int(parser, 'Scanner', 'ScanRegionStart', s.scan_region_start, 0, 2**63 - 1)
+        s.scan_region_end = _get_int(parser, 'Scanner', 'ScanRegionEnd', s.scan_region_end, 0, 2**63 - 1)
+
 
     return cfg
 
@@ -196,6 +263,7 @@ def save_config(cfg: OverlayConfig, config_path: str = None):
     parser.set('Scanner', 'AobPatterns', '\n'.join(s.aob_patterns))
     parser.set('Scanner', 'ScanRegionStart', str(s.scan_region_start))
     parser.set('Scanner', 'ScanRegionEnd', str(s.scan_region_end))
+
 
     # Add blank line before sections (configparser doesn't do this natively)
     with open(config_path, 'w', encoding='utf-8') as f:
