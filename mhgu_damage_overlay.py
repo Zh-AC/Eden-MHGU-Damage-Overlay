@@ -20,7 +20,7 @@ Requirements:
     - eden Switch emulator running MHGU
 """
 
-__version__ = "1.0.1"
+__version__ = "1.0.2"
 
 import sys
 import os
@@ -97,7 +97,7 @@ _log(f'Executable: {sys.executable}')
 _log(f'Working dir: {os.getcwd()}')
 
 try:
-    from core.config import load_config, OverlayConfig
+    from core.config import load_config, OverlayConfig, take_config_warnings
     from core.scanner import (
         ProcessManager,
         MemoryScanner,
@@ -127,6 +127,8 @@ class MHGUDamageOverlay:
     def __init__(self, config_path: str = None):
         _log('Loading config...')
         self.config = load_config(config_path)
+        for w in take_config_warnings():
+            _log('CONFIG WARNING: ' + w)
         _log(f'Config loaded. Emulator target: {self.config.scanner.emulator_process}')
         self.process_handle = None
         self.pid = None
@@ -135,7 +137,6 @@ class MHGUDamageOverlay:
         self.renderer: Optional[OverlayRenderer] = None
         self.running = False
         self._scan_thread: Optional[threading.Thread] = None
-        self._cached_hp_addrs: set = set()  # Cache successful addresses across scans
 
     def find_emulator(self) -> bool:
         """Locate and attach to the emulator process."""
@@ -284,19 +285,30 @@ class MHGUDamageOverlay:
         full_scan_interval = 15.0
         initial_scan_done = False
         scan_in_progress = False
+        rescan_soon = False          # tracker dropped a monster: rescan now
+        empty_scan_streak = 0        # consecutive full scans finding nothing
 
         while self.running:
             try:
                 current_time = time.time()
 
-                # Full AOB scan: only if game is running, with cooldown
+                # Full AOB scan scheduling:
+                #  * before the first success: only when the game window is
+                #    visible (avoids useless scans during boot), on cooldown;
+                #  * after the first success: keep scanning periodically NO
+                #    MATTER what the window-title check says. The title
+                #    probe is a heuristic that can false-negative (minimized
+                #    window, renamed title bar); once monsters were found we
+                #    must keep rediscovering them after quest/zone changes
+                #    (1.0.1 report: "after the first monster, 0 damage").
+                #  * immediately when the tracker dropped addresses (dead /
+                #    stale monsters) so the player never waits a full cycle.
                 game_running = self._is_game_running()
                 since_last = current_time - last_scan_attempt
                 need_full_scan = (
-                    game_running and (
-                        (not initial_scan_done and since_last > scan_cooldown) or
-                        (initial_scan_done and current_time - last_full_scan > full_scan_interval)
-                    )
+                    (not initial_scan_done and game_running and since_last > scan_cooldown) or
+                    (initial_scan_done and current_time - last_full_scan > full_scan_interval) or
+                    (rescan_soon and current_time - last_full_scan > 1.0)
                 )
                 if not game_running and not initial_scan_done:
                     # Game not loaded yet — skip scan, try again later
@@ -309,11 +321,28 @@ class MHGUDamageOverlay:
                     self._find_and_track_monsters(found_addresses)
                     last_full_scan = current_time
                     scan_in_progress = False
+                    rescan_soon = False
                     if found_addresses:
                         initial_scan_done = True
+                        empty_scan_streak = 0
                         _log('Initial scan done, tracking %d monsters' % len(found_addresses))
-                    elif not initial_scan_done:
-                        _log('Scan found no monsters, will retry in %ds' % scan_cooldown)
+                    else:
+                        # Nothing found on the current region base. If this
+                        # repeats, the emulated-RAM region may have moved
+                        # (game reload): re-detect the base instead of
+                        # scanning the wrong region forever (that state
+                        # looked like "0 damage until restart" in 1.0.1).
+                        empty_scan_streak += 1
+                        if empty_scan_streak >= 2 and has_scanmodule():
+                            new_base = get_game_region(
+                                self.pid, self.config.scanner.emulator_process)
+                            empty_scan_streak = 0
+                            if new_base and new_base != self.eden_base:
+                                _log('Game region moved: 0x%X -> 0x%X'
+                                     % (self.eden_base or 0, new_base))
+                                self.eden_base = new_base
+                        if not initial_scan_done:
+                            _log('Scan found no monsters, will retry in %ds' % scan_cooldown)
 
                 # Fast HP update (just reads known addresses)
                 if self.tracker:
@@ -321,21 +350,59 @@ class MHGUDamageOverlay:
                         damages = self.tracker.update()
                         if damages:
                             for dmg, mid in damages:
+                                ammo = None
+                                state = None
                                 if self.renderer:
-                                    self.renderer.spawn_damage_number(
-                                        dmg, is_small=mid in SMALL_MONSTERS)
-                                _log('Damage: %d (mid=%s)' % (dmg, mid))
+                                    state = self.renderer.spawn_damage_number(
+                                        dmg, is_small=mid in SMALL_MONSTERS,
+                                        mid=mid)
+                                name = MONSTER_NAMES.get(mid, 'Unknown')
+                                ammo_s = f' ammo={ammo}' if ammo is not None else ''
+                                if state:
+                                    tname, B, ratio = state
+                                    if B is not None:
+                                        _log('Damage: %d (%s mid=%s%s) [B=%.0f r=%.2f %s]'
+                                             % (dmg, name, mid, ammo_s,
+                                                B, ratio, tname))
+                                    else:
+                                        _log('Damage: %d (%s mid=%s%s) [%s]'
+                                             % (dmg, name, mid, ammo_s, tname))
+                                else:
+                                    _log('Damage: %d (%s mid=%s%s)'
+                                         % (dmg, name, mid, ammo_s))
                         self.tracker.cleanup_old_damage(max_age=10.0)
                         # Drop addresses the tracker has removed (dead/left monsters)
                         # so they can be rediscovered by the next full scan.
                         if found_addresses:
+                            before = len(found_addresses)
                             found_addresses.intersection_update(self.tracker.monsters.keys())
+                            if len(found_addresses) < before:
+                                # A monster slot died / went stale: ask for
+                                # an immediate full scan instead of waiting
+                                # up to a full cycle (slow intervals made
+                                # this a multi-minute outage in 1.0.1).
+                                rescan_soon = True
                     else:
                         events = self.tracker.update()
                         if events:
                             for event in events:
+                                state = None
                                 if self.renderer:
-                                    self.renderer.spawn_damage_number(event.damage)
+                                    state = self.renderer.spawn_damage_number(
+                                        event.damage, mid=event.monster_id)
+                                name = MONSTER_NAMES.get(event.monster_id, 'Unknown')
+                                if state:
+                                    tname, B, ratio = state
+                                    if B is not None:
+                                        _log('Damage: %d (%s mid=%s) [B=%.0f r=%.2f %s]'
+                                             % (event.damage, name, event.monster_id,
+                                                B, ratio, tname))
+                                    else:
+                                        _log('Damage: %d (%s mid=%s) [%s]'
+                                             % (event.damage, name, event.monster_id, tname))
+                                else:
+                                    _log('Damage: %d (%s mid=%s)'
+                                         % (event.damage, name, event.monster_id))
                         self.tracker.cleanup_old_events(max_age_seconds=10.0)
 
                 consecutive_errors = 0
@@ -347,52 +414,49 @@ class MHGUDamageOverlay:
                     _log(f'Scan error: {e}')
                 time.sleep(1.0)
 
-    def _find_and_track_monsters(self, found_addresses: set):
-        """Search for monster HP addresses."""
-        # First: try cached addresses from previous successful scans
-        if self._cached_hp_addrs and not found_addresses:
-            _log(f'Trying {len(self._cached_hp_addrs)} cached addresses...')
-            valid_cached = []
-            for addr in self._cached_hp_addrs:
-                # Validate the slot is still a real monster (id + sane HP)
-                # before reusing it - memory may have been recycled.
-                desc = describe_monster(self.process_handle, addr)
-                if desc and desc[0] in MONSTER_NAMES and 1 <= desc[1] <= (desc[2] or 65535):
-                    valid_cached.append(addr)
-                    if addr not in found_addresses:
-                        self.tracker.add_monster(addr)
-                        found_addresses.add(addr)
-            if valid_cached:
-                _log(f'Reused {len(valid_cached)} cached monsters')
-                return
-            else:
-                _log(f'Cached addresses stale, running full scan')
+    def _find_and_track_monsters(self, found_addresses: set) -> int:
+        """Full AOB scan for monster HP addresses; returns how many NEW
+        monsters were added.
+
+        There is deliberately no "reuse cached addresses and skip the full
+        scan" shortcut anymore: a stale cached slot that still validated
+        used to return early and could starve every OTHER monster for the
+        rest of the session (1.0.1 report: "killed one monster, afterwards
+        all scans show 0 damage, must restart"). The full scan is only a
+        few seconds and runs at most every few seconds, so just do it.
+        """
+        added = 0
 
         # Eden path: full AOB scan
         if has_scanmodule() and self.eden_base:
             try:
                 addresses = find_monster_hp(self.process_handle, self.eden_base)
                 if addresses:
-                    self._cached_hp_addrs = set(addresses)  # Update cache
                     for addr in addresses:
                         if addr not in found_addresses:
                             self.tracker.add_monster(addr)
                             found_addresses.add(addr)
-                            _log(f'Monster tracked: 0x{addr:X}')
+                            added += 1
+                            try:
+                                info = describe_monster(self.process_handle, addr)
+                                mname = MONSTER_NAMES.get(info[0], '?') if info else '?'
+                                _log(f'Monster tracked: 0x{addr:X} ({mname})')
+                            except Exception:
+                                _log(f'Monster tracked: 0x{addr:X}')
             except Exception as e:
                 _log(f'AOB scan error: {e}')
-            return
+            return added
 
         # If scanmodule available but base not found, retry getting base
         if has_scanmodule() and not self.eden_base:
             self.eden_base = get_game_region(self.pid, self.config.scanner.emulator_process)
             if self.eden_base:
                 _log(f'Game region found on retry: 0x{self.eden_base:X}')
-                return
+                return added
 
         # Fallback path
         if not self.scanner:
-            return
+            return added
 
         patterns = self.config.scanner.aob_patterns
         region_start = self.config.scanner.scan_region_start
@@ -409,8 +473,10 @@ class MHGUDamageOverlay:
                     monster_id = self.tracker.add_monster(addr)
                     if monster_id >= 0:
                         found_addresses.add(addr)
+                        added += 1
         except Exception as e:
             _log(f'Find monsters error: {e}')
+        return added
 
     def run(self):
         """Main entry point."""
