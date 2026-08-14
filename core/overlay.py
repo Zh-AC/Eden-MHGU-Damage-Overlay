@@ -10,6 +10,7 @@ font loading (FontPath now honored), window follow/sync included.
 
 import ctypes, ctypes.wintypes, time, random, threading, numpy as np
 import os
+from collections import deque
 from typing import List, Optional
 from dataclasses import dataclass, field
 from PIL import Image, ImageDraw, ImageFont
@@ -341,17 +342,25 @@ class OverlayRenderer:
         gdi32.SelectObject(hdc_mem, old_bmp); gdi32.DeleteObject(hbm)
         gdi32.DeleteDC(hdc_mem); user32.ReleaseDC(0, hdc_screen)
 
-    def _tier_color(self, damage: int) -> tuple:
-        """White < mid threshold < yellow < high threshold < orange."""
-        if damage < self._th_mid:
-            return self._dc_low
-        if damage < self._th_high:
-            return self._dc_mid
-        return self._dc_high
+    def _tier_state(self, damage: int, key=None):
+        """Grade one hit. Returns (color, tier_name, B, ratio).
 
-    def spawn_damage_number(self, damage: int, is_small: bool = False):
+        fixed mode: absolute thresholds (white < mid < yellow < high < orange),
+        B/ratio are None.
+        """
+        if damage < self._th_mid:
+            return self._dc_low, '白', None, None
+        if damage < self._th_high:
+            return self._dc_mid, '黄', None, None
+        return self._dc_high, '橙', None, None
+
+    def spawn_damage_number(self, damage: int, is_small: bool = False,
+                            mid=None):
+        """Spawn one floating number; returns (tier_name, B, ratio) for
+        logging, or None when the tier is not computed (numbers hidden).
+        """
         if not self.config.renderer.show_damage_numbers:
-            return
+            return None
         with self._lock:
             cfg = self.config
             fs = cfg.renderer.font_size
@@ -379,13 +388,14 @@ class OverlayRenderer:
             if len(self._stagger_positions) > cfg.logic.overlap_max:
                 self._stagger_positions.pop(0)
 
+            color, tname, B, ratio = self._tier_state(damage)
             fn = FloatingNumber(damage=damage, x=cx, y=cy, spawn_time=time.time(),
                 lifetime=cfg.logic.lifetime, fade_time=cfg.logic.fade_time,
-                stagger_x=stagger_x, small=is_small,
-                color=self._tier_color(damage))
+                stagger_x=stagger_x, small=is_small, color=color)
             self.floating_numbers.append(fn)
             while len(self.floating_numbers) > cfg.logic.overlap_max:
                 self.floating_numbers.pop(0)
+            return (tname, B, ratio)
 
     def render_loop(self, fps=60):
         self.running = True; ft = 1.0/fps
