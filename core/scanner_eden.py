@@ -17,6 +17,7 @@ when a quest loads.
 import ctypes
 import ctypes.wintypes
 import time as _time
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional, List, Dict, Tuple
 
@@ -298,6 +299,15 @@ def describe_monster(handle: int, hp_ptr: int) -> Optional[Tuple[int, int, int]]
 class EdenMonsterTracker:
     """Tracks monster HP and detects damage events."""
 
+    # Consecutive-invalid-read tolerance, measured in SECONDS of wall clock,
+    # NOT in poll counts. A poll-count constant (the old `bad_reads >= 20`)
+    # scaled with the user's ScanIntervalMs: at 15 s/poll the stale address
+    # survived 20 polls = 5 minutes of silence before being dropped and
+    # re-scanned (players reported "damage appears only after ~5 min").
+    # Time-based means recovery always takes ~INVALID_DROP_S regardless of
+    # the configured interval.
+    INVALID_DROP_S = 1.2
+
     def __init__(self, process_handle: int):
         self.handle = process_handle
         self.monsters: Dict[int, dict] = {}
@@ -314,9 +324,17 @@ class EdenMonsterTracker:
         self.monsters[hp_address] = {
             'hp': hp, 'max_hp': max_hp, 'init_hp': max_hp,
             'prev_hp': hp, 'id': self._next_id, 'mid': mid,
-            'bad_reads': 0,
+            'bad_since': None,  # time of first consecutive invalid read
         }
         self._next_id += 1
+
+    def _note_invalid(self, info: dict) -> bool:
+        """Stamp the start of an invalid-read run; True when the address
+        has been invalid long enough to drop (time-based, poll-independent)."""
+        now = _time.time()
+        if info['bad_since'] is None:
+            info['bad_since'] = now
+        return now - info['bad_since'] > self.INVALID_DROP_S
 
     def update(self) -> List[Tuple[int, int]]:
         """Poll monster HP; return damage events as (damage, monster_id).
@@ -335,6 +353,10 @@ class EdenMonsterTracker:
         for addr, info in list(self.monsters.items()):
             hp = read_hp(self.handle, addr)
             if hp is None:
+                # Unreadable address also counts toward invalidation: a page
+                # that stays unmapped (region moved) must not linger forever.
+                if self._note_invalid(info):
+                    del self.monsters[addr]
                 continue
             mid = read_u16(self.handle, addr - OFF_HP_PTR + OFF_NAME)
             init_hp = read_u16(self.handle, addr - OFF_HP_PTR + OFF_INIT_HP)
@@ -356,16 +378,18 @@ class EdenMonsterTracker:
                 info['max_hp'] = max(hp, init_hp)
                 info['prev_hp'] = hp
                 info['hp'] = hp
-                info['bad_reads'] = 0
+                info['bad_since'] = None
                 continue
 
             # Real monster HP can never exceed its quest max (init_hp).
             # Anything above it means the address was recycled into garbage.
             if hp <= 0 or hp > info['init_hp']:
-                # Emit the killing blow only for a real death: HP exactly 0
-                # and the monster id still readable and unchanged. During
-                # scene reloads the id is often unreadable (None) - skip.
-                if hp == 0 and info['bad_reads'] == 0 \
+                # Emit the killing blow only for a real death: HP exactly 0,
+                # the monster id still readable and unchanged, and the
+                # PREVIOUS poll was valid (bad_since is None) so info['hp']
+                # really is the monster's last known HP. During scene
+                # reloads the id is often unreadable (None) - skip.
+                if hp == 0 and info['bad_since'] is None \
                         and mid is not None and mid == info['mid']:
                     delta = info['hp']
                     if 0 < delta <= 5000:
@@ -373,12 +397,13 @@ class EdenMonsterTracker:
                         self.damage_events.append((delta, _time.time()))
                 # Tolerate transient bad reads (area transitions, state
                 # changes can briefly zero/spike the HP field). Only drop
-                # the address after ~1s of consistently invalid values.
-                info['bad_reads'] += 1
-                if info['bad_reads'] >= 20:
+                # the address after INVALID_DROP_S of consistently invalid
+                # values - in wall-clock time, so the recovery delay does
+                # NOT scale with the configured scan interval.
+                if self._note_invalid(info):
                     del self.monsters[addr]
                 continue
-            info['bad_reads'] = 0
+            info['bad_since'] = None
             if hp > info['max_hp']:
                 info['max_hp'] = hp
             info['prev_hp'] = info['hp']
